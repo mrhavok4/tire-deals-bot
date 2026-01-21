@@ -46,3 +46,6 @@ def run():
 
 if __name__ == "__main__":
     run()
+        else:
+        send_telegram_message(BOT_TOKEN, CHAT_ID, "TireBot: execução OK, sem novidades.")
+
