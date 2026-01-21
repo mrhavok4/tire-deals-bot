@@ -86,11 +86,10 @@ def build_casasbahia_search_url(query: str) -> str:
     return f"https://www.casasbahia.com.br/busca/{q}"
 
 def scrape_casasbahia(search_url: str) -> List[Dict[str, Any]]:
-    html = _get(search_url)
-    soup = BeautifulSoup(html, "lxml")
-
-    deals: List[Dict[str, Any]] = []
-
+   html = _get(search_url)
+if not html:
+    return []
+    
     # Heurística por cards com link + algum preço "R$"
     for a in soup.select("a[href]"):
         href = a.get("href", "").strip()
