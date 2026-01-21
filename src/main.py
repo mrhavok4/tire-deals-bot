@@ -3,7 +3,6 @@ from src.db import connect, upsert_deal
 from src.bot import send_telegram_message
 from src.scraper import scrape_atacadao, scrape_dpaschoal
 
-
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
@@ -22,20 +21,20 @@ def format_price(price_cents):
     return f"R$ {reais:,}".replace(",", ".") + f",{cents:02d}"
 
 def run():
-    if not SOURCES:
-        send_telegram_message(BOT_TOKEN, CHAT_ID, "TireBot: configure SOURCES em src/main.py")
-        return
-
     conn = connect(DB_PATH)
 
     new_items = []
     for url, source in SOURCES:
-    if source == "atacadao":
-        deals = scrape_atacadao(url)
-    elif source == "dpaschoal":
-        deals = scrape_dpaschoal(url)
-    else:
-        continue
+        if source == "atacadao":
+            deals = scrape_atacadao(url)
+        elif source == "dpaschoal":
+            deals = scrape_dpaschoal(url)
+        else:
+            continue
+
+        for d in deals:
+            if upsert_deal(conn, d):
+                new_items.append(d)
 
     if new_items:
         lines = ["Novas promoções encontradas:"]
