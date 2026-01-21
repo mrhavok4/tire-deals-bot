@@ -2,7 +2,7 @@ name: Tire Deals Bot
 
 on:
   schedule:
-    - cron: "0 */4 * * *"  # a cada 4 horas (UTC)
+    - cron: "0 */4 * * *"
   workflow_dispatch: {}
 
 jobs:
@@ -22,7 +22,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Opcional: persistir o SQLite entre execuções via cache
       - name: Cache DB
         uses: actions/cache@v4
         with:
