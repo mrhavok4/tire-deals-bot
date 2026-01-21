@@ -25,8 +25,10 @@ def _price_to_cents_from_text(text: str) -> Optional[int]:
         return whole * 100
     return None
 
-def _get(url: str) -> str:
+def _get(url: str) -> Optional[str]:
     r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+    if r.status_code in (403, 429):
+        return None
     r.raise_for_status()
     return r.text
 
