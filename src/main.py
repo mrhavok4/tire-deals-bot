@@ -6,7 +6,7 @@ from src.db import connect, upsert_deal
 from src.bot import send_telegram_message
 from src.scraper import (
     build_ml_search_url, scrape_mercadolivre,
-    build_casasbahia_search_url, scrape_casasbahia,
+   # build_casasbahia_search_url, scrape_casasbahia,
     build_magalu_search_url, scrape_magalu,
     polite_sleep,
 )
@@ -65,15 +65,11 @@ def run():
         polite_sleep()
 
         # Casas Bahia
-        cb_url = build_casasbahia_search_url(q)
-        deals = scrape_casasbahia(cb_url)
-        for d in deals:
-            aro = detect_aro(d["title"])
-            if aro and within_limit(aro, d.get("price_cents")):
-                d["title"] = f"{d['title']} (aro {aro})"
-                if upsert_deal(conn, d):
-                    new_items.append(d)
-        polite_sleep()
+       # cb_url = build_casasbahia_search_url(q)
+# deals = scrape_casasbahia(cb_url)
+# ...
+# polite_sleep()
+
 
         # Magalu
         mg_url = build_magalu_search_url(q)
