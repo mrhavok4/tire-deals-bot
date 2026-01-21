@@ -1,0 +1,39 @@
+name: Tire Deals Bot
+
+on:
+  schedule:
+    - cron: "0 */4 * * *"  # a cada 4 horas (UTC)
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Opcional: persistir o SQLite entre execuções via cache
+      - name: Cache DB
+        uses: actions/cache@v4
+        with:
+          path: tirebot.sqlite
+          key: tirebot-db-${{ github.ref }}
+          restore-keys: |
+            tirebot-db-
+
+      - name: Run
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: |
+          python -m src.main
