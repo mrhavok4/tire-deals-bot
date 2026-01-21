@@ -1,7 +1,8 @@
 import os
 from src.db import connect, upsert_deal
 from src.bot import send_telegram_message
-from src.scraper import scrape_generic_listing
+from src.scraper import scrape_atacadao, scrape_dpaschoal
+
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
@@ -9,8 +10,8 @@ CHAT_ID = os.environ["CHAT_ID"]
 DB_PATH = "tirebot.sqlite"
 
 SOURCES = [
-    # Coloque suas URLs aqui (página de busca/categoria):
-    # ("https://www.lojaX.com.br/busca/pneu", "Loja X"),
+    ("https://www.atacadao.com.br/automotivo/pneus", "atacadao"),
+    ("https://www.dpaschoal.com.br/pneus-e-camaras/carro-de-passeio", "dpaschoal"),
 ]
 
 def format_price(price_cents):
@@ -29,10 +30,12 @@ def run():
 
     new_items = []
     for url, source in SOURCES:
-        deals = scrape_generic_listing(url, source)
-        for d in deals:
-            if upsert_deal(conn, d):
-                new_items.append(d)
+    if source == "atacadao":
+        deals = scrape_atacadao(url)
+    elif source == "dpaschoal":
+        deals = scrape_dpaschoal(url)
+    else:
+        continue
 
     if new_items:
         lines = ["Novas promoções encontradas:"]
