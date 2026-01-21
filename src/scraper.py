@@ -1,62 +1,72 @@
 import re
 import requests
 from bs4 import BeautifulSoup
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from urllib.parse import urljoin
 
-def _price_to_cents(text: str) -> Optional[int]:
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; TireBot/1.0)"
+}
+
+def price_to_cents(text: str):
     if not text:
         return None
-    text = text.strip()
-
     m = re.search(r"(\d{1,3}(\.\d{3})*|\d+),(\d{2})", text)
-    if m:
-        whole = m.group(1).replace(".", "")
-        cents = m.group(3)
-        return int(whole) * 100 + int(cents)
+    if not m:
+        return None
+    return int(m.group(1).replace(".", "")) * 100 + int(m.group(3))
 
-    m = re.search(r"(\d{1,3}(\.\d{3})*|\d+)", text)
-    if m:
-        whole = m.group(1).replace(".", "")
-        return int(whole) * 100
-    return None
-
-def scrape_generic_listing(url: str, source: str) -> List[Dict[str, Any]]:
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; TireBot/1.0)"}
-    r = requests.get(url, headers=headers, timeout=30)
+# ---------- ATACADÃO ----------
+def scrape_atacadao(url: str) -> List[Dict[str, Any]]:
+    r = requests.get(url, headers=HEADERS, timeout=30)
     r.raise_for_status()
-
     soup = BeautifulSoup(r.text, "lxml")
 
-    deals: List[Dict[str, Any]] = []
-    for a in soup.select("a[href]")[:600]:
-        title = a.get_text(" ", strip=True)
-        href = a["href"].strip()
-
-        if not title or len(title) < 8:
-            continue
+    deals = []
+    for card in soup.select("a[href*='/produto/']"):
+        title = card.get_text(" ", strip=True)
         if "pneu" not in title.lower():
             continue
 
-        full_url = urljoin(url, href)
-
-        # tenta achar preço próximo
-        container = a.parent
-        price_text = ""
-        for _ in range(3):
-            if not container:
-                break
-            txt = container.get_text(" ", strip=True)
-            if "R$" in txt or re.search(r"\d+,\d{2}", txt):
-                price_text = txt
-                break
-            container = container.parent
+        full_url = urljoin(url, card["href"])
+        container = card.find_parent("article") or card.parent
+        price_el = container.select_one("[class*='price'], [class*='Price']")
+        price = price_to_cents(price_el.get_text(strip=True) if price_el else "")
 
         deals.append({
             "url": full_url,
             "title": title[:180],
-            "price_cents": _price_to_cents(price_text),
-            "source": source,
+            "price_cents": price,
+            "source": "Atacadão",
+        })
+
+        if len(deals) >= 40:
+            break
+
+    return deals
+
+# ---------- DPASCHOAL ----------
+def scrape_dpaschoal(url: str) -> List[Dict[str, Any]]:
+    r = requests.get(url, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "lxml")
+
+    deals = []
+    for card in soup.select("a[href*='/pneu']"):
+        title = card.get_text(" ", strip=True)
+        if "pneu" not in title.lower():
+            continue
+
+        full_url = urljoin(url, card["href"])
+        container = card.find_parent("div")
+        price_el = container.select_one("[class*='price'], [class*='valor']")
+        price = price_to_cents(price_el.get_text(strip=True) if price_el else "")
+
+        deals.append({
+            "url": full_url,
+            "title": title[:180],
+            "price_cents": price,
+            "source": "DPaschoal",
         })
 
         if len(deals) >= 40:
