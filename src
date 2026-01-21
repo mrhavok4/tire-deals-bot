@@ -1,0 +1,10 @@
+tire-deals-bot/
+  src/
+    main.py
+    db.py
+    bot.py
+    scraper.py
+  requirements.txt
+  .github/
+    workflows/
+      run.yml
