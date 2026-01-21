@@ -1,0 +1,46 @@
+import os
+from src.db import connect, upsert_deal
+from src.bot import send_telegram_message
+from src.scraper import scrape_generic_listing
+
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+CHAT_ID = os.environ["CHAT_ID"]
+
+DB_PATH = "tirebot.sqlite"
+
+SOURCES = [
+    # Coloque suas URLs aqui (página de busca/categoria):
+    # ("https://www.lojaX.com.br/busca/pneu", "Loja X"),
+]
+
+def format_price(price_cents):
+    if price_cents is None:
+        return "Preço não identificado"
+    reais = price_cents // 100
+    cents = price_cents % 100
+    return f"R$ {reais:,}".replace(",", ".") + f",{cents:02d}"
+
+def run():
+    if not SOURCES:
+        send_telegram_message(BOT_TOKEN, CHAT_ID, "TireBot: configure SOURCES em src/main.py")
+        return
+
+    conn = connect(DB_PATH)
+
+    new_items = []
+    for url, source in SOURCES:
+        deals = scrape_generic_listing(url, source)
+        for d in deals:
+            if upsert_deal(conn, d):
+                new_items.append(d)
+
+    if new_items:
+        lines = ["Novas promoções encontradas:"]
+        for d in new_items[:20]:
+            lines.append(f"- {d['title']} | {format_price(d.get('price_cents'))}\n  {d['url']}")
+        if len(new_items) > 20:
+            lines.append(f"(+{len(new_items)-20} itens)")
+        send_telegram_message(BOT_TOKEN, CHAT_ID, "\n".join(lines))
+
+if __name__ == "__main__":
+    run()
