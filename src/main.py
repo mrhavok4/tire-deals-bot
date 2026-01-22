@@ -16,7 +16,6 @@ CHAT_ID = os.environ["CHAT_ID"]
 
 DB_PATH = "tirebot.sqlite"
 
-# Limites em centavos
 LIMITS = {13: 20000, 14: 26000, 15: 29000}
 AROS = [13, 14, 15]
 
@@ -41,7 +40,7 @@ def within_limit(aro: int, price_cents: Optional[int]) -> bool:
     return price_cents <= LIMITS[aro]
 
 def build_queries() -> List[str]:
-    # queries simples (o aro será detectado no título)
+    # manter simples: a detecção do aro é no título
     return [f"pneu R{a}" for a in AROS]
 
 def run():
@@ -50,39 +49,30 @@ def run():
 
     for q in build_queries():
         # Mercado Livre
-        ml_url = build_ml_search_url(q)
-        deals = scrape_mercadolivre(ml_url)
+        deals = scrape_mercadolivre(build_ml_search_url(q))
         for d in deals:
             aro = detect_aro(d["title"])
-            if not aro:
-                continue
-            if within_limit(aro, d.get("price_cents")):
+            if aro and within_limit(aro, d.get("price_cents")):
                 d["title"] = f"{d['title']} (aro {aro})"
                 if upsert_deal(conn, d):
                     new_items.append(d)
         polite_sleep()
 
-        # Casas Bahia (pode retornar vazio por 403/429)
-        cb_url = build_casasbahia_search_url(q)
-        deals = scrape_casasbahia(cb_url)
+        # Casas Bahia (pode vir vazio por 403)
+        deals = scrape_casasbahia(build_casasbahia_search_url(q))
         for d in deals:
             aro = detect_aro(d["title"])
-            if not aro:
-                continue
-            if within_limit(aro, d.get("price_cents")):
+            if aro and within_limit(aro, d.get("price_cents")):
                 d["title"] = f"{d['title']} (aro {aro})"
                 if upsert_deal(conn, d):
                     new_items.append(d)
         polite_sleep()
 
         # Magalu
-        mg_url = build_magalu_search_url(q)
-        deals = scrape_magalu(mg_url)
+        deals = scrape_magalu(build_magalu_search_url(q))
         for d in deals:
             aro = detect_aro(d["title"])
-            if not aro:
-                continue
-            if within_limit(aro, d.get("price_cents")):
+            if aro and within_limit(aro, d.get("price_cents")):
                 d["title"] = f"{d['title']} (aro {aro})"
                 if upsert_deal(conn, d):
                     new_items.append(d)
@@ -98,7 +88,7 @@ def run():
             lines.append(f"(+{len(new_items)-20} itens)")
         send_telegram_message(BOT_TOKEN, CHAT_ID, "\n".join(lines))
     else:
-        # Opcional: comente se não quiser mensagem quando não achar nada
+        # opcional: comente para não enviar “sem novidades”
         send_telegram_message(BOT_TOKEN, CHAT_ID, "TireBot: execução OK. Sem pneus dentro dos limites.")
 
 if __name__ == "__main__":
