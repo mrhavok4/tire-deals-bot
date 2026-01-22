@@ -6,7 +6,7 @@ from src.db import connect, upsert_deal
 from src.bot import send_telegram_message
 from src.scraper import (
     build_ml_search_url, scrape_mercadolivre,
-   # build_casasbahia_search_url, scrape_casasbahia,
+    build_casasbahia_search_url, scrape_casasbahia,
     build_magalu_search_url, scrape_magalu,
     polite_sleep,
 )
@@ -29,15 +29,11 @@ def format_price(cents: Optional[int]) -> str:
 
 def detect_aro(text: str) -> Optional[int]:
     t = (text or "").lower()
-    # pega "r13", "r 13", "aro 13"
     for a in AROS:
         if re.search(rf"\br\s*{a}\b", t) or re.search(rf"\baro\s*{a}\b", t):
             return a
-    # também aceita medidas "175/70 r13"
     m = re.search(r"\br\s*(13|14|15)\b", t)
-    if m:
-        return int(m.group(1))
-    return None
+    return int(m.group(1)) if m else None
 
 def within_limit(aro: int, price_cents: Optional[int]) -> bool:
     if price_cents is None:
@@ -45,7 +41,7 @@ def within_limit(aro: int, price_cents: Optional[int]) -> bool:
     return price_cents <= LIMITS[aro]
 
 def build_queries() -> List[str]:
-    # consultas simples por aro
+    # queries simples (o aro será detectado no título)
     return [f"pneu R{a}" for a in AROS]
 
 def run():
@@ -58,25 +54,35 @@ def run():
         deals = scrape_mercadolivre(ml_url)
         for d in deals:
             aro = detect_aro(d["title"])
-            if aro and within_limit(aro, d.get("price_cents")):
+            if not aro:
+                continue
+            if within_limit(aro, d.get("price_cents")):
                 d["title"] = f"{d['title']} (aro {aro})"
                 if upsert_deal(conn, d):
                     new_items.append(d)
         polite_sleep()
 
-        # Casas Bahia
-       # cb_url = build_casasbahia_search_url(q)
-# deals = scrape_casasbahia(cb_url)
-# ...
-# polite_sleep()
-
+        # Casas Bahia (pode retornar vazio por 403/429)
+        cb_url = build_casasbahia_search_url(q)
+        deals = scrape_casasbahia(cb_url)
+        for d in deals:
+            aro = detect_aro(d["title"])
+            if not aro:
+                continue
+            if within_limit(aro, d.get("price_cents")):
+                d["title"] = f"{d['title']} (aro {aro})"
+                if upsert_deal(conn, d):
+                    new_items.append(d)
+        polite_sleep()
 
         # Magalu
         mg_url = build_magalu_search_url(q)
         deals = scrape_magalu(mg_url)
         for d in deals:
             aro = detect_aro(d["title"])
-            if aro and within_limit(aro, d.get("price_cents")):
+            if not aro:
+                continue
+            if within_limit(aro, d.get("price_cents")):
                 d["title"] = f"{d['title']} (aro {aro})"
                 if upsert_deal(conn, d):
                     new_items.append(d)
@@ -85,12 +91,14 @@ def run():
     if new_items:
         lines = [f"Pneus dentro do limite: {len(new_items)}"]
         for d in new_items[:20]:
-            lines.append(f"- [{d['source']}] {d['title']} | {format_price(d.get('price_cents'))}\n  {d['url']}")
+            lines.append(
+                f"- [{d['source']}] {d['title']} | {format_price(d.get('price_cents'))}\n  {d['url']}"
+            )
         if len(new_items) > 20:
             lines.append(f"(+{len(new_items)-20} itens)")
         send_telegram_message(BOT_TOKEN, CHAT_ID, "\n".join(lines))
     else:
-        # Opcional: comentar a linha abaixo se não quiser “sem novidades”
+        # Opcional: comente se não quiser mensagem quando não achar nada
         send_telegram_message(BOT_TOKEN, CHAT_ID, "TireBot: execução OK. Sem pneus dentro dos limites.")
 
 if __name__ == "__main__":
