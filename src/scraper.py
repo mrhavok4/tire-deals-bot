@@ -127,9 +127,12 @@ def scrape_casasbahia(search_url: str) -> List[Dict[str, Any]]:
     return deals
 
 # ---------------- Magazine Luiza ----------------
-def build_magalu_search_url(query: str) -> str:
-    q = query.strip().replace(" ", "-")
-    return f"https://www.magazineluiza.com.br/busca/{q}/"
+def _best_price_from_text(txt: str) -> Optional[int]:
+    # pega todos "R$ x.xxx,yy" e escolhe o MAIOR (evita pegar parcela)
+    prices = re.findall(r"R\$\s*\d{1,3}(?:\.\d{3})*,\d{2}", txt)
+    cents_list = [ _price_to_cents_from_text(p) for p in prices ]
+    cents_list = [c for c in cents_list if c is not None]
+    return max(cents_list) if cents_list else None
 
 def scrape_magalu(search_url: str) -> List[Dict[str, Any]]:
     html = _get(search_url)
@@ -142,25 +145,47 @@ def scrape_magalu(search_url: str) -> List[Dict[str, Any]]:
     for a in soup.select("a[href]"):
         href = a.get("href", "").strip()
         title = a.get_text(" ", strip=True)
-
-        if not href or not title or "pneu" not in title.lower():
+        if not href or not title:
+            continue
+        if "pneu" not in title.lower():
             continue
 
         full_url = urljoin(search_url, href)
 
+        # 1) ignora resultados que são páginas de busca/categoria
+        if "/busca/" in full_url:
+            continue
+
+        # 2) aceita apenas links de produto (Magalu geralmente contém "/p/")
+        if "/p/" not in full_url:
+            continue
+
         container = a
         price_cents = None
-        for _ in range(7):
+        for _ in range(8):
             if container is None:
                 break
             txt = container.get_text(" ", strip=True)
-            m = re.search(r"R\$\s*\d{1,3}(?:\.\d{3})*,\d{2}", txt)
-            if m:
-                price_cents = _price_to_cents_from_text(m.group(0))
+
+            # preferir "no Pix" se existir
+            pix_match = re.search(r"R\$\s*\d{1,3}(?:\.\d{3})*,\d{2}\s+no\s+Pix", txt, flags=re.I)
+            if pix_match:
+                price_cents = _price_to_cents_from_text(pix_match.group(0))
                 break
+
+            # fallback: maior preço no texto do container
+            best = _best_price_from_text(txt)
+            if best is not None:
+                price_cents = best
+                break
+
             container = container.parent
 
         if price_cents is None:
+            continue
+
+        # 3) filtro anti-ruído: ignora "preços" muito baixos
+        if price_cents < 10000:  # < R$100
             continue
 
         deals.append({
@@ -174,6 +199,7 @@ def scrape_magalu(search_url: str) -> List[Dict[str, Any]]:
             break
 
     return deals
+
 
 def polite_sleep():
     time.sleep(1.2)
