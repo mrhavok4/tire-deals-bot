@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 from src.db import connect, upsert_deal
 from src.bot import send_telegram_message
@@ -12,7 +12,6 @@ CHAT_ID = os.environ["CHAT_ID"]
 LIMITS = {13: 20000, 14: 26000, 15: 29000}  # centavos
 DB_PATH = "tirebot.sqlite"
 
-# Medidas comuns (ajustáveis) para aumentar recall
 MEASURES = {
     13: ["175/70 R13", "165/70 R13", "165/80 R13"],
     14: ["175/65 R14", "185/60 R14", "165/70 R14"],
@@ -33,9 +32,17 @@ def looks_like_kit(title: str) -> bool:
 def format_price(cents: int) -> str:
     return f"R$ {cents//100:,}".replace(",", ".") + f",{cents%100:02d}"
 
+def _push_topn(topn: List[Dict[str, Any]], item: Dict[str, Any], n: int = 10):
+    topn.append(item)
+    topn.sort(key=lambda x: x["price_cents"])
+    if len(topn) > n:
+        topn[:] = topn[:n]
+
 def run():
     conn = connect(DB_PATH)
+
     new_items: List[Dict[str, Any]] = []
+    top_by_aro: Dict[int, List[Dict[str, Any]]] = {13: [], 14: [], 15: []}
 
     total_scanned = 0
     total_candidates = 0
@@ -56,30 +63,37 @@ def run():
                 for d in deals:
                     title = d.get("title", "")
                     price = d.get("price_cents")
+                    url = d.get("url")
 
-                    if price is None:
+                    if not title or not url or price is None:
                         continue
-
-                    # evita kit/jogo
                     if looks_like_kit(title):
                         continue
 
                     aro_found = detect_aro(title)
-                    if aro_found != aro:
+                    if aro_found not in (13, 14, 15):
                         continue
 
-                    if price > LIMITS[aro]:
-                        continue
+                    # guarda TOP 10 mais baratos por aro (mesmo acima do limite)
+                    _push_topn(top_by_aro[aro_found], {
+                        "source": d.get("source", "?"),
+                        "title": title[:160],
+                        "url": url,
+                        "price_cents": price,
+                        "aro": aro_found,
+                    }, n=10)
 
-                    if upsert_deal(conn, d):
-                        dd = dict(d)
-                        dd["title"] = f"{title[:180]} (aro {aro})"
-                        new_items.append(dd)
+                    # dentro do limite -> alerta normal
+                    if price <= LIMITS[aro_found]:
+                        if upsert_deal(conn, d):
+                            dd = dict(d)
+                            dd["title"] = f"{title[:180]} (aro {aro_found})"
+                            new_items.append(dd)
 
                 polite_sleep()
 
     if new_items:
-        lines = [f"Promoções encontradas: {len(new_items)}"]
+        lines = [f"Promoções dentro do limite: {len(new_items)}"]
         for d in new_items[:20]:
             lines.append(
                 f"- [{d['source']}] {d['title']} | {format_price(d['price_cents'])}\n  {d['url']}"
@@ -87,12 +101,25 @@ def run():
         if len(new_items) > 20:
             lines.append(f"(+{len(new_items)-20} itens)")
         send_telegram_message(BOT_TOKEN, CHAT_ID, "\n".join(lines))
-    else:
-        send_telegram_message(
-            BOT_TOKEN,
-            CHAT_ID,
-            f"TireBot: execução OK. Consultas: {total_scanned}. Itens lidos: {total_candidates}. Sem resultados dentro dos limites."
-        )
+        return
+
+    # Se não achou nada dentro do limite -> relatório de referência
+    lines = [
+        f"TireBot: sem resultados dentro dos limites.",
+        f"Consultas: {total_scanned}. Itens lidos: {total_candidates}.",
+        "TOP mais baratos por aro (para calibrar):",
+    ]
+
+    for aro in (13, 14, 15):
+        lines.append(f"\nAro {aro} (limite atual {format_price(LIMITS[aro])}):")
+        top = top_by_aro[aro]
+        if not top:
+            lines.append("- (nenhum item detectado)")
+            continue
+        for it in top[:10]:
+            lines.append(f"- [{it['source']}] {it['title']} | {format_price(it['price_cents'])}\n  {it['url']}")
+
+    send_telegram_message(BOT_TOKEN, CHAT_ID, "\n".join(lines))
 
 if __name__ == "__main__":
     run()
