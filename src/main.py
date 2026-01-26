@@ -1,6 +1,7 @@
 import os
 import re
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, DefaultDict
+from collections import defaultdict
 
 from src.db import connect, upsert_deal
 from src.bot import send_telegram_message
@@ -21,8 +22,7 @@ MEASURES = {
 UNWANTED = ["kit", "jogo", "4 pneus", "2 pneus", "par", "combo"]
 
 def detect_aro(text: str) -> Optional[int]:
-    t = (text or "").lower()
-    m = re.search(r"\br\s*(13|14|15)\b", t)
+    m = re.search(r"\bR\s*(13|14|15)\b", (text or "").upper())
     return int(m.group(1)) if m else None
 
 def looks_like_kit(title: str) -> bool:
@@ -36,34 +36,37 @@ def _push_topn(topn: List[Dict[str, Any]], item: Dict[str, Any], n: int = 10):
     topn.append(item)
     topn.sort(key=lambda x: x["price_cents"])
     if len(topn) > n:
-        topn[:] = topn[:n]
+        del topn[n:]
 
 def run():
     conn = connect(DB_PATH)
 
     new_items: List[Dict[str, Any]] = []
-    top_by_aro: Dict[int, List[Dict[str, Any]]] = {13: [], 14: [], 15: []}
+    top_by_aro = {13: [], 14: [], 15: []}
 
-    total_scanned = 0
+    stats: DefaultDict[str, int] = defaultdict(int)   # contagem por source
     total_candidates = 0
 
-    for aro, queries in MEASURES.items():
-        for q in queries:
-            query = f"pneu {q}"
-
-            for scraper in (scrape_pneustore, scrape_pneufree, scrape_magalu):
+    for aro, measures in MEASURES.items():
+        for measure in measures:
+            # PneuStore / PneuFree usam medida; Magalu usa texto
+            for fn, arg, src in (
+                (scrape_pneustore, measure, "PneuStore"),
+                (scrape_pneufree, measure, "PneuFree"),
+                (scrape_magalu, f"pneu {measure}", "MagazineLuiza"),
+            ):
                 try:
-                    deals = scraper(query)
+                    deals = fn(arg)
                 except Exception:
                     deals = []
 
-                total_scanned += 1
+                stats[src] += len(deals)
                 total_candidates += len(deals)
 
                 for d in deals:
                     title = d.get("title", "")
                     price = d.get("price_cents")
-                    url = d.get("url")
+                    url = d.get("url", "")
 
                     if not title or not url or price is None:
                         continue
@@ -74,16 +77,14 @@ def run():
                     if aro_found not in (13, 14, 15):
                         continue
 
-                    # guarda TOP 10 mais baratos por aro (mesmo acima do limite)
                     _push_topn(top_by_aro[aro_found], {
-                        "source": d.get("source", "?"),
+                        "source": d.get("source", src),
                         "title": title[:160],
                         "url": url,
                         "price_cents": price,
                         "aro": aro_found,
                     }, n=10)
 
-                    # dentro do limite -> alerta normal
                     if price <= LIMITS[aro_found]:
                         if upsert_deal(conn, d):
                             dd = dict(d)
@@ -95,21 +96,18 @@ def run():
     if new_items:
         lines = [f"Promoções dentro do limite: {len(new_items)}"]
         for d in new_items[:20]:
-            lines.append(
-                f"- [{d['source']}] {d['title']} | {format_price(d['price_cents'])}\n  {d['url']}"
-            )
+            lines.append(f"- [{d['source']}] {d['title']} | {format_price(d['price_cents'])}\n  {d['url']}")
         if len(new_items) > 20:
             lines.append(f"(+{len(new_items)-20} itens)")
         send_telegram_message(BOT_TOKEN, CHAT_ID, "\n".join(lines))
         return
 
-    # Se não achou nada dentro do limite -> relatório de referência
+    # relatório (agora deve vir com itens)
     lines = [
-        f"TireBot: sem resultados dentro dos limites.",
-        f"Consultas: {total_scanned}. Itens lidos: {total_candidates}.",
+        "TireBot: sem resultados dentro dos limites.",
+        f"Itens lidos: {total_candidates} (PneuStore={stats['PneuStore']}, PneuFree={stats['PneuFree']}, Magalu={stats['MagazineLuiza']}).",
         "TOP mais baratos por aro (para calibrar):",
     ]
-
     for aro in (13, 14, 15):
         lines.append(f"\nAro {aro} (limite atual {format_price(LIMITS[aro])}):")
         top = top_by_aro[aro]
