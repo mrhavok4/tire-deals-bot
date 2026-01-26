@@ -5,7 +5,7 @@ from collections import defaultdict
 
 from src.db import connect, upsert_deal
 from src.bot import send_telegram_message
-from src.scraper import scrape_pneustore, scrape_pneufree, scrape_magalu, polite_sleep
+from src.scraper import scrape_pneustore, scrape_pneufree, scrape_magalu, polite_sleep, parse_measure
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
@@ -35,8 +35,7 @@ def format_price(cents: int) -> str:
 def _push_topn(topn: List[Dict[str, Any]], item: Dict[str, Any], n: int = 10):
     topn.append(item)
     topn.sort(key=lambda x: x["price_cents"])
-    if len(topn) > n:
-        del topn[n:]
+    del topn[n:]
 
 def run():
     conn = connect(DB_PATH)
@@ -44,29 +43,36 @@ def run():
     new_items: List[Dict[str, Any]] = []
     top_by_aro = {13: [], 14: [], 15: []}
 
-    stats: DefaultDict[str, int] = defaultdict(int)   # contagem por source
+    stats: DefaultDict[str, int] = defaultdict(int)
     total_candidates = 0
 
     for aro, measures in MEASURES.items():
         for measure in measures:
-            # PneuStore / PneuFree usam medida; Magalu usa texto
-            for fn, arg, src in (
+            # Magalu: evitar "/" na query (melhora busca e encoding)
+            pm = parse_measure(measure)
+            if pm:
+                magalu_query = f"pneu {pm['largura']} {pm['altura']} {pm['aro']}"
+            else:
+                magalu_query = f"pneu {measure}"
+
+            for fn, arg, label in (
                 (scrape_pneustore, measure, "PneuStore"),
                 (scrape_pneufree, measure, "PneuFree"),
-                (scrape_magalu, f"pneu {measure}", "MagazineLuiza"),
+                (scrape_magalu, magalu_query, "MagazineLuiza"),
             ):
                 try:
                     deals = fn(arg)
-                except Exception:
+                except Exception as e:
+                    print(f"[WARN] scraper error {label}: {e}")
                     deals = []
 
-                stats[src] += len(deals)
+                stats[label] += len(deals)
                 total_candidates += len(deals)
 
                 for d in deals:
                     title = d.get("title", "")
-                    price = d.get("price_cents")
                     url = d.get("url", "")
+                    price = d.get("price_cents")
 
                     if not title or not url or price is None:
                         continue
@@ -78,11 +84,10 @@ def run():
                         continue
 
                     _push_topn(top_by_aro[aro_found], {
-                        "source": d.get("source", src),
+                        "source": d.get("source", label),
                         "title": title[:160],
                         "url": url,
                         "price_cents": price,
-                        "aro": aro_found,
                     }, n=10)
 
                     if price <= LIMITS[aro_found]:
@@ -102,7 +107,6 @@ def run():
         send_telegram_message(BOT_TOKEN, CHAT_ID, "\n".join(lines))
         return
 
-    # relatório (agora deve vir com itens)
     lines = [
         "TireBot: sem resultados dentro dos limites.",
         f"Itens lidos: {total_candidates} (PneuStore={stats['PneuStore']}, PneuFree={stats['PneuFree']}, Magalu={stats['MagazineLuiza']}).",
@@ -116,7 +120,6 @@ def run():
             continue
         for it in top[:10]:
             lines.append(f"- [{it['source']}] {it['title']} | {format_price(it['price_cents'])}\n  {it['url']}")
-
     send_telegram_message(BOT_TOKEN, CHAT_ID, "\n".join(lines))
 
 if __name__ == "__main__":
