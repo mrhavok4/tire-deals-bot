@@ -1,164 +1,342 @@
 import re
 import time
-from typing import List, Dict, Any, Optional, Tuple
-from urllib.parse import urljoin, quote_plus
+import random
+from typing import Optional, Dict, Any, List
+from urllib.parse import quote_plus, urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
+UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.6,en;q=0.5",
-    "Connection": "keep-alive",
+    "User-Agent": UA,
+    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
 }
-TIMEOUT = 30
-
-UNAVAILABLE_WORDS = ["indisponível", "indisponivel", "esgotado", "sem estoque", "fora de estoque"]
 
 def polite_sleep():
-    time.sleep(1.0)
+    time.sleep(random.uniform(0.5, 1.2))
 
-def _has_unavailable(text: str) -> bool:
-    t = (text or "").lower()
-    return any(w in t for w in UNAVAILABLE_WORDS)
+# ---------- helpers ----------
+def parse_measure(measure: str) -> Optional[Dict[str, str]]:
+    """
+    "175/70 R13" -> {"largura":"175","altura":"70","aro":"13"}
+    """
+    if not measure:
+        return None
+    m = re.search(r"(\d{3})\s*/\s*(\d{2})\s*R\s*(\d{2})", measure.upper())
+    if not m:
+        return None
+    return {"largura": m.group(1), "altura": m.group(2), "aro": m.group(3)}
 
-def _price_to_cents(text: str) -> Optional[int]:
+def _get(url: str) -> Optional[str]:
+    r = requests.get(url, headers=HEADERS, timeout=30)
+    if r.status_code in (403, 429):
+        return None
+    r.raise_for_status()
+    return r.text
+
+def _brl_to_cents_from_any(text: str) -> Optional[int]:
     if not text:
         return None
-    m = re.search(r"(\d{1,3}(?:\.\d{3})*),(\d{2})", text)
-    if not m:
-        return None
-    return int(m.group(1).replace(".", "")) * 100 + int(m.group(2))
-
-def _best_price_from_text(txt: str) -> Optional[int]:
-    prices = re.findall(r"R\$\s*\d{1,3}(?:\.\d{3})*,\d{2}", txt)
+    # pega todos "R$ x.xxx,yy" e devolve o maior (evita parcela)
+    prices = re.findall(r"R\$\s*\d{1,3}(?:\.\d{3})*,\d{2}", text)
     cents = []
     for p in prices:
-        c = _price_to_cents(p)
-        if c is not None:
-            cents.append(c)
+        m = re.search(r"R\$\s*([\d\.\,]+)", p)
+        if not m:
+            continue
+        num = m.group(1).replace(".", "").replace(",", ".")
+        try:
+            cents.append(int(round(float(num) * 100)))
+        except:
+            pass
     return max(cents) if cents else None
 
-def _get(url: str) -> Tuple[Optional[str], int]:
-    r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-    if r.status_code in (403, 429):
-        print(f"[WARN] blocked {r.status_code} -> {url}")
-        return None, r.status_code
-    if r.status_code >= 400:
-        print(f"[WARN] http {r.status_code} -> {url}")
-        return None, r.status_code
-    return r.text, r.status_code
+def _looks_unavailable(text: str) -> bool:
+    t = (text or "").lower()
+    return any(w in t for w in ["indisponível", "indisponivel", "esgotado", "sem estoque", "fora de estoque"])
 
-def parse_measure(measure: str) -> Optional[Dict[str, int]]:
-    m = re.search(r"(\d{3})\s*/\s*(\d{2})\s*R\s*(\d{2})", (measure or "").upper())
-    if not m:
-        return None
-    return {"largura": int(m.group(1)), "altura": int(m.group(2)), "aro": int(m.group(3))}
+def _looks_like_kit(title: str) -> bool:
+    t = (title or "").lower()
+    return any(w in t for w in ["kit", "jogo", "4 pneus", "2 pneus", "par", "combo"])
 
-def measure_to_slug(measure: str) -> Optional[str]:
+# ---------- PneuStore ----------
+def _pneustore_url_for_measure(measure: str) -> str:
     pm = parse_measure(measure)
-    if not pm:
-        return None
-    return f"{pm['largura']}-{pm['altura']}-r{pm['aro']}"
+    if pm:
+        # Padrão comum: /categorias/pneus-de-carro/175-70-r13
+        slug = f"{pm['largura']}-{pm['altura']}-r{pm['aro']}".lower()
+        return f"https://www.pneustore.com.br/categorias/pneus-de-carro/{slug}"
+    # fallback genérico
+    return f"https://www.pneustore.com.br/busca?q={quote_plus(measure)}"
 
-def _extract_deals_from_page(base_url: str, html: str, source: str, product_href_hint: str) -> List[Dict[str, Any]]:
+def scrape_pneustore(measure: str) -> List[Dict[str, Any]]:
+    url = _pneustore_url_for_measure(measure)
+    html = _get(url)
+    if not html:
+        return []
+
     soup = BeautifulSoup(html, "lxml")
     deals: List[Dict[str, Any]] = []
 
-    # pega links de produto e busca preço no “card” (subindo alguns pais)
-    for a in soup.select(f"a[href*='{product_href_hint}']"):
-        href = (a.get("href") or "").strip()
+    # Estratégia robusta:
+    # - procura anchors que parecem produto e extrai texto do card
+    for a in soup.select("a[href]"):
         title = a.get_text(" ", strip=True)
-        if not href or not title:
+        if not title:
             continue
         if "pneu" not in title.lower():
             continue
+        if _looks_like_kit(title):
+            continue
 
-        full_url = href if href.startswith("http") else urljoin(base_url, href)
+        href = a.get("href") or ""
+        full_url = urljoin(url, href)
 
-        container = a
-        price_cents = None
-        text_blob = ""
-        for _ in range(8):
-            if container is None:
+        # evita links óbvios que não são produto
+        if "/categorias/" in full_url or "/busca" in full_url:
+            continue
+
+        card = a
+        card_text = ""
+        for _ in range(6):
+            if card is None:
                 break
-            text_blob = container.get_text(" ", strip=True)
-
-            if _has_unavailable(text_blob):
-                price_cents = None
+            card_text = card.get_text(" ", strip=True)
+            if "R$" in card_text:
                 break
+            card = card.parent
 
-            # preferir “no pix” / “à vista” quando aparecer
-            m_pix = re.search(r"(R\$\s*\d{1,3}(?:\.\d{3})*,\d{2}).{0,25}\bPix\b", text_blob, flags=re.I)
-            if m_pix:
-                price_cents = _price_to_cents(m_pix.group(1))
-                break
+        if _looks_unavailable(card_text):
+            continue
 
-            m_av = re.search(r"(R\$\s*\d{1,3}(?:\.\d{3})*,\d{2}).{0,25}\bà\s*vista\b", text_blob, flags=re.I)
-            if m_av:
-                price_cents = _price_to_cents(m_av.group(1))
-                break
-
-            best = _best_price_from_text(text_blob)
-            if best is not None:
-                price_cents = best
-                break
-
-            container = container.parent
-
+        price_cents = _brl_to_cents_from_any(card_text)
         if price_cents is None:
             continue
-        if price_cents < 10000:  # anti-ruído
+
+        # anti-ruído
+        if price_cents < 10000:
             continue
 
         deals.append({
-            "url": full_url,
+            "source": "PneuStore",
             "title": title[:180],
+            "url": full_url,
             "price_cents": price_cents,
-            "source": source,
         })
 
-        if len(deals) >= 60:
-            break
+    # dedup por url
+    seen = set()
+    out = []
+    for d in deals:
+        if d["url"] in seen:
+            continue
+        seen.add(d["url"])
+        out.append(d)
 
-    return deals
+    return out[:60]
 
-# -------- PneuStore --------
-def scrape_pneustore(measure: str) -> List[Dict[str, Any]]:
-    slug = measure_to_slug(measure)
-    if not slug:
-        return []
-    url = f"https://www.pneustore.com.br/categorias/pneus-de-carro/{slug}"
-    html, _ = _get(url)
-    if not html:
-        return []
-    # PneuStore costuma usar /produto/ nas URLs
-    return _extract_deals_from_page(url, html, "PneuStore", "/produto/")
-
-# -------- PneuFree --------
-def scrape_pneufree(measure: str) -> List[Dict[str, Any]]:
+# ---------- PneuFree ----------
+def _pneufree_url_for_measure(measure: str) -> str:
     pm = parse_measure(measure)
-    if not pm:
-        return []
-    url = f"https://www.pneufree.com.br/pesquisa?altura={pm['altura']}&aro={pm['aro']}&largura={pm['largura']}"
-    html, _ = _get(url)
+    if pm:
+        # tentativa por parâmetros (caso exista)
+        return f"https://www.pneufree.com.br/busca?busca={quote_plus(measure)}"
+    return f"https://www.pneufree.com.br/busca?busca={quote_plus(measure)}"
+
+def _scrape_pneufree_html(measure: str) -> List[Dict[str, Any]]:
+    url = _pneufree_url_for_measure(measure)
+    html = _get(url)
     if not html:
         return []
-    # PneuFree tem URLs variadas; usar heurística “pneu” + preço no card. Hint mais amplo:
-    return _extract_deals_from_page(url, html, "PneuFree", "/pneu")
+    soup = BeautifulSoup(html, "lxml")
 
-# -------- Magalu --------
-def build_magalu_url(query: str) -> str:
-    # Magalu usa %2B no path como separador
-    enc = quote_plus(query)        # espaço vira '+'
-    enc = enc.replace("+", "%2B")  # no path vira %2B
-    return f"https://www.magazineluiza.com.br/busca/{enc}/"
+    # Se o HTML vier "vazio" (JS), costuma ter poucos/nenhum "R$"
+    if soup.get_text(" ", strip=True).count("R$") < 2:
+        return []
 
+    deals: List[Dict[str, Any]] = []
+    for a in soup.select("a[href]"):
+        title = a.get_text(" ", strip=True)
+        if not title or "pneu" not in title.lower():
+            continue
+        if _looks_like_kit(title):
+            continue
+
+        href = a.get("href") or ""
+        full_url = urljoin(url, href)
+
+        card = a
+        card_text = ""
+        for _ in range(7):
+            if card is None:
+                break
+            card_text = card.get_text(" ", strip=True)
+            if "R$" in card_text:
+                break
+            card = card.parent
+
+        if _looks_unavailable(card_text):
+            continue
+
+        price_cents = _brl_to_cents_from_any(card_text)
+        if price_cents is None or price_cents < 10000:
+            continue
+
+        deals.append({
+            "source": "PneuFree",
+            "title": title[:180],
+            "url": full_url,
+            "price_cents": price_cents,
+        })
+
+    # dedup
+    seen = set()
+    out = []
+    for d in deals:
+        if d["url"] in seen:
+            continue
+        seen.add(d["url"])
+        out.append(d)
+
+    return out[:60]
+
+def _scrape_pneufree_playwright(measure: str) -> List[Dict[str, Any]]:
+    url = _pneufree_url_for_measure(measure)
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return []
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(user_agent=UA, locale="pt-BR")
+        page.goto(url, wait_until="networkidle", timeout=60000)
+        html = page.content()
+        browser.close()
+
+    soup = BeautifulSoup(html, "lxml")
+    deals: List[Dict[str, Any]] = []
+
+    for a in soup.select("a[href]"):
+        title = a.get_text(" ", strip=True)
+        if not title or "pneu" not in title.lower():
+            continue
+        if _looks_like_kit(title):
+            continue
+
+        href = a.get("href") or ""
+        full_url = urljoin(url, href)
+
+        card = a
+        card_text = ""
+        for _ in range(8):
+            if card is None:
+                break
+            card_text = card.get_text(" ", strip=True)
+            if "R$" in card_text:
+                break
+            card = card.parent
+
+        if _looks_unavailable(card_text):
+            continue
+
+        price_cents = _brl_to_cents_from_any(card_text)
+        if price_cents is None or price_cents < 10000:
+            continue
+
+        deals.append({
+            "source": "PneuFree",
+            "title": title[:180],
+            "url": full_url,
+            "price_cents": price_cents,
+        })
+
+    # dedup
+    seen = set()
+    out = []
+    for d in deals:
+        if d["url"] in seen:
+            continue
+        seen.add(d["url"])
+        out.append(d)
+
+    return out[:60]
+
+def scrape_pneufree(measure: str) -> List[Dict[str, Any]]:
+    deals = _scrape_pneufree_html(measure)
+    if deals:
+        return deals
+    # fallback JS
+    return _scrape_pneufree_playwright(measure)
+
+# ---------- Magalu (o seu estava funcionando) ----------
 def scrape_magalu(query: str) -> List[Dict[str, Any]]:
-    url = build_magalu_url(query)
-    html, _ = _get(url)
+    url = f"https://www.magazineluiza.com.br/busca/{quote_plus(query).replace('%2F','%20')}/"
+    html = _get(url)
     if not html:
         return []
-    # Magalu produto normalmente contém "/p/"
-    return _extract_deals_from_page(url, html, "MagazineLuiza", "/p/")
+
+    soup = BeautifulSoup(html, "lxml")
+    deals: List[Dict[str, Any]] = []
+
+    for a in soup.select("a[href]"):
+        href = (a.get("href") or "").strip()
+        if not href:
+            continue
+        title = a.get_text(" ", strip=True)
+        if not title or "pneu" not in title.lower():
+            continue
+        if _looks_like_kit(title):
+            continue
+
+        full_url = urljoin(url, href)
+        if "/busca/" in full_url:
+            continue
+        if "/p/" not in full_url:
+            continue
+
+        card = a
+        card_text = ""
+        price_cents = None
+        for _ in range(10):
+            if card is None:
+                break
+            card_text = card.get_text(" ", strip=True)
+
+            if _looks_unavailable(card_text):
+                price_cents = None
+                break
+
+            # Preferir "no Pix"
+            m_pix = re.search(r"(R\$\s*\d{1,3}(?:\.\d{3})*,\d{2})\s+no\s+Pix", card_text, flags=re.I)
+            if m_pix:
+                price_cents = _brl_to_cents_from_any(m_pix.group(1))
+                break
+
+            if "R$" in card_text:
+                price_cents = _brl_to_cents_from_any(card_text)
+                break
+
+            card = card.parent
+
+        if price_cents is None or price_cents < 10000:
+            continue
+
+        deals.append({
+            "source": "MagazineLuiza",
+            "title": title[:180],
+            "url": full_url,
+            "price_cents": price_cents,
+        })
+
+    # dedup
+    seen = set()
+    out = []
+    for d in deals:
+        if d["url"] in seen:
+            continue
+        seen.add(d["url"])
+        out.append(d)
+
+    return out[:60]
