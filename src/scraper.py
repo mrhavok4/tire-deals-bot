@@ -1,4 +1,5 @@
 import re
+import json
 import time
 from typing import Optional, Dict, Any, List
 from urllib.parse import quote_plus, urlparse, urlunparse
@@ -28,49 +29,6 @@ def looks_like_kit(text: str) -> bool:
     t = (text or "").lower()
     return any(w in t for w in ["kit", "jogo", "4 pneus", "2 pneus", "par", "combo"])
 
-# ---------------- Mercado Livre (API oficial) ----------------
-def scrape_mercadolivre(query: str) -> List[Dict[str, Any]]:
-    # API pública (bem mais estável que HTML)
-    url = "https://api.mercadolibre.com/sites/MLB/search"
-    params = {"q": query, "limit": 50}
-    r = requests.get(url, params=params, timeout=30, headers={"User-Agent": UA})
-    r.raise_for_status()
-    data = r.json()
-
-    deals: List[Dict[str, Any]] = []
-    for it in data.get("results", []):
-        title = (it.get("title") or "").strip()
-        if not title:
-            continue
-        if "pneu" not in title.lower():
-            continue
-        if looks_like_kit(title):
-            continue
-
-        price = it.get("price")
-        if price is None:
-            continue
-
-        # price vem em BRL (float/number)
-        try:
-            price_cents = int(round(float(price) * 100))
-        except Exception:
-            continue
-
-        permalink = it.get("permalink") or it.get("canonical_url") or ""
-        if not permalink:
-            continue
-
-        deals.append({
-            "source": "MercadoLivre",
-            "title": title[:180],
-            "url": normalize_url(permalink),
-            "price_cents": price_cents,
-        })
-
-    return deals
-
-# ---------------- Shopee (endpoint JSON do front; pode falhar por bloqueio) ----------------
 def scrape_shopee(query: str) -> List[Dict[str, Any]]:
     url = "https://shopee.com.br/api/v4/search/search_items"
     params = {
@@ -91,7 +49,6 @@ def scrape_shopee(query: str) -> List[Dict[str, Any]]:
     }
 
     r = requests.get(url, params=params, headers=headers, timeout=30)
-    # se bloquear, não derruba o job — só retorna vazio
     if r.status_code in (401, 403, 418, 429):
         return []
     r.raise_for_status()
@@ -103,9 +60,7 @@ def scrape_shopee(query: str) -> List[Dict[str, Any]]:
     for wrap in items:
         it = wrap.get("item_basic") or {}
         title = (it.get("name") or "").strip()
-        if not title:
-            continue
-        if "pneu" not in title.lower():
+        if not title or "pneu" not in title.lower():
             continue
         if looks_like_kit(title):
             continue
@@ -115,10 +70,10 @@ def scrape_shopee(query: str) -> List[Dict[str, Any]]:
         if not shopid or not itemid:
             continue
 
-        # Shopee costuma mandar preço em “microunidades” (heurística estável: cents = price//1000)
         price_raw = it.get("price_min") or it.get("price") or it.get("price_max")
         if not isinstance(price_raw, int):
             continue
+
         price_cents = int(price_raw // 1000)
         if price_cents < 10000:
             continue
