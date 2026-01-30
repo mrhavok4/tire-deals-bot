@@ -32,7 +32,5 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-          # opcional (melhora rate limit):
-          # JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
         run: |
           python -m src.main
