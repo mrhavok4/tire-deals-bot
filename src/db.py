@@ -29,4 +29,9 @@ def upsert_deal(conn: sqlite3.Connection, deal: Dict[str, Any]) -> bool:
         conn.commit()
         return True
     except sqlite3.IntegrityError:
+        conn.execute(
+            "UPDATE deals SET last_seen_at=CURRENT_TIMESTAMP WHERE url=? AND price_cents IS ?",
+            (deal["url"], deal.get("price_cents")),
+        )
+        conn.commit()
         return False
