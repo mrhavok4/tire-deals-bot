@@ -1,5 +1,5 @@
 import os
-from typing import Optional, Dict, Any, List, DefaultDict
+from typing import Dict, Any, List, DefaultDict
 from collections import defaultdict
 
 from src.db import connect, upsert_deal
@@ -46,10 +46,7 @@ def run():
     for aro, measures in MEASURES.items():
         for measure in measures:
             pm = parse_measure(measure)
-            if pm:
-                q = f"pneu {pm['largura']} {pm['altura']} r{pm['aro']}"
-            else:
-                q = f"pneu {measure}"
+            q = f"pneu {pm['largura']} {pm['altura']} r{pm['aro']}" if pm else f"pneu {measure}"
 
             for fn, label in (
                 (scrape_mercadolivre, "MercadoLivre"),
@@ -74,12 +71,11 @@ def run():
                     if looks_like_kit(title):
                         continue
 
-                    aro_found = detect_aro(title)
+                    aro_found = detect_aro(title) or aro
                     if aro_found not in (13, 14, 15):
-                        # fallback: usa o aro do loop se não detectar no título
-                        aro_found = aro
+                        continue
 
-                    # sempre guarda TOP baratos para calibrar
+                    # top barato sempre
                     _push_topn(top_by_aro[aro_found], {
                         "source": d.get("source", label),
                         "title": title[:160],
@@ -106,7 +102,6 @@ def run():
         send_telegram_message(BOT_TOKEN, CHAT_ID, "\n".join(lines))
         return
 
-    # relatório (sempre útil)
     lines = [
         "TireBot: sem resultados dentro dos limites.",
         f"Itens lidos: {total_candidates} (ML={stats['MercadoLivre']}, Shopee={stats['Shopee']}).",
