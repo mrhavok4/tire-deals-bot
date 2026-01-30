@@ -32,5 +32,9 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+          ALERT_RSS_13: ${{ secrets.ALERT_RSS_13 }}
+          ALERT_RSS_14: ${{ secrets.ALERT_RSS_14 }}
+          ALERT_RSS_15: ${{ secrets.ALERT_RSS_15 }}
         run: |
           python -m src.main
+
