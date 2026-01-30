@@ -1,18 +1,14 @@
 import re
-import json
 import time
 from typing import Optional, Dict, Any, List
 from urllib.parse import quote_plus, urlparse, urlunparse
 
 import requests
-from bs4 import BeautifulSoup
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
 
-UNAVAILABLE_WORDS = ["indisponível", "indisponivel", "esgotado", "sem estoque", "fora de estoque"]
-
 def polite_sleep():
-    time.sleep(1.0)
+    time.sleep(0.8)
 
 def normalize_url(u: str) -> str:
     p = urlparse(u)
@@ -28,172 +24,110 @@ def detect_aro(text: str) -> Optional[int]:
     m = re.search(r"\bR\s*(13|14|15)\b", (text or "").upper())
     return int(m.group(1)) if m else None
 
-def looks_unavailable(text: str) -> bool:
-    t = (text or "").lower()
-    return any(w in t for w in UNAVAILABLE_WORDS)
-
 def looks_like_kit(text: str) -> bool:
     t = (text or "").lower()
     return any(w in t for w in ["kit", "jogo", "4 pneus", "2 pneus", "par", "combo"])
 
-def brl_to_cents_from_any(text: str) -> Optional[int]:
-    # pega todos os R$ x.xxx,yy e usa o MAIOR (evita pegar valor de parcela)
-    prices = re.findall(r"R\$\s*\d{1,3}(?:\.\d{3})*,\d{2}", text or "")
-    cents = []
-    for p in prices:
-        m = re.search(r"R\$\s*([\d\.\,]+)", p)
-        if not m:
-            continue
-        num = m.group(1).replace(".", "").replace(",", ".")
-        try:
-            cents.append(int(round(float(num) * 100)))
-        except:
-            pass
-    return max(cents) if cents else None
-
-# ---------------- Mercado Livre ----------------
+# ---------------- Mercado Livre (API oficial) ----------------
 def scrape_mercadolivre(query: str) -> List[Dict[str, Any]]:
-    url = f"https://lista.mercadolivre.com.br/{quote_plus(query).replace('%20','-')}"
-    r = requests.get(url, headers={"User-Agent": UA, "Accept-Language": "pt-BR,pt;q=0.9"}, timeout=30)
-    if r.status_code in (403, 429):
-        return []
+    # API pública (bem mais estável que HTML)
+    url = "https://api.mercadolibre.com/sites/MLB/search"
+    params = {"q": query, "limit": 50}
+    r = requests.get(url, params=params, timeout=30, headers={"User-Agent": UA})
     r.raise_for_status()
+    data = r.json()
 
-    soup = BeautifulSoup(r.text, "lxml")
     deals: List[Dict[str, Any]] = []
-
-    for item in soup.select("li.ui-search-layout__item"):
-        a = item.select_one("a.ui-search-link")
-        title_el = item.select_one("h2.ui-search-item__title")
-        if not a or not title_el:
+    for it in data.get("results", []):
+        title = (it.get("title") or "").strip()
+        if not title:
+            continue
+        if "pneu" not in title.lower():
+            continue
+        if looks_like_kit(title):
             continue
 
-        href = (a.get("href") or "").strip()
-        title = title_el.get_text(" ", strip=True)
-        blob = item.get_text(" ", strip=True)
-
-        if not href or not title:
-            continue
-        if looks_unavailable(blob) or looks_like_kit(title):
+        price = it.get("price")
+        if price is None:
             continue
 
-        # preço no card
-        frac = item.select_one("span.price-tag-fraction")
-        cents = item.select_one("span.price-tag-cents")
-        price_cents = None
-        if frac:
-            ft = frac.get_text(strip=True).replace(".", "")
-            ct = (cents.get_text(strip=True) if cents else "00")
-            if ft.isdigit() and ct.isdigit():
-                price_cents = int(ft) * 100 + int(ct)
-        if price_cents is None:
-            price_cents = brl_to_cents_from_any(blob)
+        # price vem em BRL (float/number)
+        try:
+            price_cents = int(round(float(price) * 100))
+        except Exception:
+            continue
 
-        if price_cents is None or price_cents < 10000:
+        permalink = it.get("permalink") or it.get("canonical_url") or ""
+        if not permalink:
             continue
 
         deals.append({
             "source": "MercadoLivre",
             "title": title[:180],
-            "url": normalize_url(href),
+            "url": normalize_url(permalink),
             "price_cents": price_cents,
         })
 
-        if len(deals) >= 50:
-            break
-
     return deals
 
-# ---------------- Shopee ----------------
+# ---------------- Shopee (endpoint JSON do front; pode falhar por bloqueio) ----------------
 def scrape_shopee(query: str) -> List[Dict[str, Any]]:
-    # Shopee geralmente expõe dados no __NEXT_DATA__ (JSON) na página de busca
-    url = f"https://shopee.com.br/search?keyword={quote_plus(query)}"
-    r = requests.get(
-        url,
-        headers={
-            "User-Agent": UA,
-            "Accept-Language": "pt-BR,pt;q=0.9",
-            "Accept": "text/html,application/xhtml+xml",
-        },
-        timeout=30,
-    )
-    if r.status_code in (403, 429):
+    url = "https://shopee.com.br/api/v4/search/search_items"
+    params = {
+        "by": "relevancy",
+        "keyword": query,
+        "limit": 50,
+        "newest": 0,
+        "order": "desc",
+        "page_type": "search",
+        "scenario": "PAGE_GLOBAL_SEARCH",
+        "version": 2,
+    }
+    headers = {
+        "User-Agent": UA,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "pt-BR,pt;q=0.9",
+        "Referer": "https://shopee.com.br/",
+    }
+
+    r = requests.get(url, params=params, headers=headers, timeout=30)
+    # se bloquear, não derruba o job — só retorna vazio
+    if r.status_code in (401, 403, 418, 429):
         return []
     r.raise_for_status()
 
-    html = r.text
-    if looks_unavailable(html):
-        return []
-
-    # extrai __NEXT_DATA__
-    m = re.search(r'__NEXT_DATA__\s*=\s*({.*?})\s*</script>', html, flags=re.S)
-    if not m:
-        return []
-
-    try:
-        data = json.loads(m.group(1))
-    except Exception:
-        return []
-
-    # navegar de forma defensiva (estrutura pode mudar)
-    # normalmente itens ficam em props.pageProps.initialState.search.items / ou algo similar
-    items = []
-    try:
-        # tentativa 1
-        items = data["props"]["pageProps"]["initialState"]["search"]["items"]
-    except Exception:
-        pass
-    if not items:
-        try:
-            # tentativa 2 (fallback amplo)
-            blob = json.dumps(data)
-            # não dá pra reconstruir sem estrutura -> aborta
-            return []
-        except Exception:
-            return []
-
+    data = r.json()
+    items = (data.get("items") or [])
     deals: List[Dict[str, Any]] = []
 
-    for it in items:
+    for wrap in items:
+        it = wrap.get("item_basic") or {}
         title = (it.get("name") or "").strip()
-        if not title or "pneu" not in title.lower():
+        if not title:
+            continue
+        if "pneu" not in title.lower():
             continue
         if looks_like_kit(title):
             continue
 
-        # preço (Shopee às vezes dá em centavos/inteiro)
-        # campos comuns: price, price_min, price_max (em 100000? depende)
-        price_raw = it.get("price_min") or it.get("price") or it.get("price_max")
-        price_cents = None
-        if isinstance(price_raw, int):
-            # em muitos casos vem em "centavos * 1000" (ex.: 199900000 -> 199,90)
-            # heurística: se for muito grande, divide por 1000
-            if price_raw > 10_000_000:
-                price_cents = int(price_raw // 1000)
-            else:
-                price_cents = int(price_raw)
-        elif isinstance(price_raw, str) and price_raw.isdigit():
-            pr = int(price_raw)
-            price_cents = int(pr // 1000) if pr > 10_000_000 else pr
-
-        if price_cents is None or price_cents < 10000:
-            continue
-
         shopid = it.get("shopid")
         itemid = it.get("itemid")
-        if shopid and itemid:
-            link = f"https://shopee.com.br/product/{shopid}/{itemid}"
-        else:
-            link = url
+        if not shopid or not itemid:
+            continue
+
+        # Shopee costuma mandar preço em “microunidades” (heurística estável: cents = price//1000)
+        price_raw = it.get("price_min") or it.get("price") or it.get("price_max")
+        if not isinstance(price_raw, int):
+            continue
+        price_cents = int(price_raw // 1000)
+        if price_cents < 10000:
+            continue
 
         deals.append({
             "source": "Shopee",
             "title": title[:180],
-            "url": normalize_url(link),
+            "url": normalize_url(f"https://shopee.com.br/product/{shopid}/{itemid}"),
             "price_cents": price_cents,
         })
-
-        if len(deals) >= 50:
-            break
 
     return deals
