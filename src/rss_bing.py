@@ -1,10 +1,15 @@
 import re
+import time
 import requests
 from bs4 import BeautifulSoup
 
 UA = "Mozilla/5.0 (compatible; TireBot/1.0)"
 
-def fetch_rss(url: str) -> list[dict]:
+def polite_sleep():
+    time.sleep(1.0)
+
+def fetch_bing_rss(query: str) -> list[dict]:
+    url = f"https://www.bing.com/news/search?q={query}&format=rss"
     r = requests.get(url, headers={"User-Agent": UA}, timeout=30)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "xml")
@@ -27,3 +32,15 @@ def price_from_text_cents(text: str):
         except:
             pass
     return min(cents) if cents else None
+
+def detect_aro(text: str):
+    m = re.search(r"\bR\s*(13|14|15)\b", (text or "").upper())
+    return int(m.group(1)) if m else None
+
+def looks_like_kit(text: str) -> bool:
+    t = (text or "").lower()
+    return any(w in t for w in ["kit", "jogo", "4 pneus", "2 pneus", "par", "combo"])
+
+def looks_unavailable(text: str) -> bool:
+    t = (text or "").lower()
+    return any(w in t for w in ["indisponível", "esgotado", "sem estoque", "fora de estoque"])
