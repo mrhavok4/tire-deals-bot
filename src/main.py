@@ -18,7 +18,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 DB_PATH = "tirebot.sqlite"
 
-LIMITS = {13: 20000, 14: 26000, 15: 29000}  # centavos
+LIMITS = {13: 30000, 14: 36000, 15: 39000}  # centavos
 
 MEASURES = {
     13: ["175/70 R13", "165/70 R13", "165/80 R13"],
