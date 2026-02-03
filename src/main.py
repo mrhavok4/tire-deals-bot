@@ -1,22 +1,20 @@
 import os
-import re
-from typing import Dict, Any, List, DefaultDict
+from typing import Dict, Any, List
 from collections import defaultdict
 
 from src.db import connect, upsert_deal
 from src.bot import send_telegram_message
-from src.scraper import scrape_shopee, polite_sleep, detect_aro, looks_like_kit
-from src.rss import fetch_rss, price_from_text_cents
+from src.rss_bing import (
+    fetch_bing_rss, price_from_text_cents, detect_aro,
+    looks_like_kit, looks_unavailable, polite_sleep
+)
+from src.shopee import scrape_shopee
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 DB_PATH = "tirebot.sqlite"
 
 LIMITS = {13: 20000, 14: 26000, 15: 29000}
-
-RSS_13 = os.environ.get("ALERT_RSS_13", "")
-RSS_14 = os.environ.get("ALERT_RSS_14", "")
-RSS_15 = os.environ.get("ALERT_RSS_15", "")
 
 MEASURES = {
     13: ["175/70 R13", "165/70 R13", "165/80 R13"],
@@ -36,65 +34,63 @@ def run():
     conn = connect(DB_PATH)
     new_items: List[Dict[str, Any]] = []
     top_by_aro = {13: [], 14: [], 15: []}
+    stats = defaultdict(int)
 
-    stats: DefaultDict[str, int] = defaultdict(int)
-
-    rss_map = {13: RSS_13, 14: RSS_14, 15: RSS_15}
-
-    # 1) RSS (Google Alerts)
-    for aro, rss in rss_map.items():
-        if not rss:
-            continue
-        try:
-            items = fetch_rss(rss)
-        except Exception as e:
-            print(f"[WARN] RSS error aro {aro}: {e}")
-            continue
-
-        for it in items[:25]:
-            txt = f"{it['title']} {it.get('desc','')}"
-            if looks_like_kit(txt):
-                continue
-            price = price_from_text_cents(txt)
-            if price is None or price < 10000:
-                continue
-
-            deal = {
-                "source": "GoogleAlerts",
-                "title": it["title"][:180],
-                "url": it["url"],
-                "price_cents": price,
-            }
-
-            _push_topn(top_by_aro[aro], {
-                "source": deal["source"],
-                "title": deal["title"][:160],
-                "url": deal["url"],
-                "price_cents": deal["price_cents"],
-            })
-
-            if price <= LIMITS[aro]:
-                if upsert_deal(conn, deal):
-                    deal["title"] = f"{deal['title']} (aro {aro})"
-                    new_items.append(deal)
-
-    # 2) Shopee (API)
+    # 1) Bing RSS (nível Google)
     for aro, measures in MEASURES.items():
-        for measure in measures:
-            q = f"pneu {measure.replace('/',' ')}"
+        for m in measures:
+            q = f"pneu {m} preço"
+            try:
+                items = fetch_bing_rss(q)
+            except Exception as e:
+                print(f"[WARN] Bing RSS error: {e}")
+                continue
+
+            for it in items[:20]:
+                txt = f"{it['title']} {it.get('desc','')}"
+                if looks_like_kit(txt) or looks_unavailable(txt):
+                    continue
+
+                price = price_from_text_cents(txt)
+                if price is None or price < 10000:
+                    continue
+
+                aro_found = detect_aro(txt) or aro
+                deal = {
+                    "source": "BingRSS",
+                    "title": it["title"][:180],
+                    "url": it["url"],
+                    "price_cents": price,
+                }
+
+                _push_topn(top_by_aro[aro_found], {
+                    "source": deal["source"],
+                    "title": deal["title"][:160],
+                    "url": deal["url"],
+                    "price_cents": deal["price_cents"],
+                })
+
+                if price <= LIMITS[aro_found]:
+                    if upsert_deal(conn, deal):
+                        deal["title"] = f"{deal['title']} (aro {aro_found})"
+                        new_items.append(deal)
+
+            polite_sleep()
+
+    # 2) Shopee
+    for aro, measures in MEASURES.items():
+        for m in measures:
+            q = f"pneu {m.replace('/',' ')}"
             deals = scrape_shopee(q)
             stats["Shopee"] += len(deals)
 
             for d in deals:
-                title = d["title"]
                 price = d["price_cents"]
-                aro_found = detect_aro(title) or aro
-                if aro_found not in (13, 14, 15):
-                    continue
+                aro_found = detect_aro(d["title"]) or aro
 
                 _push_topn(top_by_aro[aro_found], {
                     "source": d["source"],
-                    "title": title[:160],
+                    "title": d["title"][:160],
                     "url": d["url"],
                     "price_cents": price,
                 })
@@ -102,7 +98,7 @@ def run():
                 if price <= LIMITS[aro_found]:
                     if upsert_deal(conn, d):
                         d2 = dict(d)
-                        d2["title"] = f"{title[:180]} (aro {aro_found})"
+                        d2["title"] = f"{d2['title']} (aro {aro_found})"
                         new_items.append(d2)
 
             polite_sleep()
@@ -114,20 +110,15 @@ def run():
         send_telegram_message(BOT_TOKEN, CHAT_ID, "\n".join(lines))
         return
 
-    lines = [
-        "TireBot: sem resultados dentro dos limites.",
-        f"Shopee itens: {stats['Shopee']}. RSS ativo: {bool(RSS_13 or RSS_14 or RSS_15)}.",
-        "TOP mais baratos por aro (para calibrar):",
-    ]
+    lines = ["TireBot: sem resultados dentro dos limites.", "TOP mais baratos por aro (referência):"]
     for aro in (13, 14, 15):
-        lines.append(f"\nAro {aro} (limite atual {format_price(LIMITS[aro])}):")
+        lines.append(f"\nAro {aro} (limite {format_price(LIMITS[aro])}):")
         top = top_by_aro[aro]
         if not top:
             lines.append("- (nenhum item detectado)")
             continue
         for it in top[:10]:
             lines.append(f"- [{it['source']}] {it['title']} | {format_price(it['price_cents'])}\n  {it['url']}")
-
     send_telegram_message(BOT_TOKEN, CHAT_ID, "\n".join(lines))
 
 if __name__ == "__main__":
