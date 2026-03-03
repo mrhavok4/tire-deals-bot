@@ -1,34 +1,37 @@
-def run():
-    conn = connect(DB_PATH)
-    debug_lines = []
-    new_items = []
+name: Tire Deals Bot
 
-    for aro, measures in MEASURES.items():
-        for m in measures:
-            query = f"pneu {m} preço"
-            deals = serpapi_shopping(query, SERPAPI_KEY)
+on:
+  schedule:
+    - cron: "0 */4 * * *"
+  workflow_dispatch: {}
 
-            debug_lines.append(f"\nAro {aro} — {m}")
-            for d in deals[:5]:
-                debug_lines.append(
-                    f"- {d['title']} | {format_price(d['price_cents'])}"
-                )
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-                aro_found = detect_aro(d["title"]) or aro
-                if d["price_cents"] <= LIMITS[aro_found]:
-                    if upsert_deal(conn, d):
-                        new_items.append(d)
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-    if new_items:
-        lines = ["Promoções encontradas:"]
-        for d in new_items:
-            lines.append(
-                f"- {d['title']} | {format_price(d['price_cents'])}\n  {d['url']}"
-            )
-        send_telegram_message(BOT_TOKEN, CHAT_ID, "\n".join(lines))
-    else:
-        send_telegram_message(
-            BOT_TOKEN,
-            CHAT_ID,
-            "DEBUG — preços atuais:\n" + "\n".join(debug_lines[:40])
-        )
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Cache DB
+        uses: actions/cache@v4
+        with:
+          path: tirebot.sqlite
+          key: tirebot-db
+          restore-keys: |
+            tirebot-db
+
+      - name: Run
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+        run: |
+          python -m src.main
