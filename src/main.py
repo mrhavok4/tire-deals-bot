@@ -49,19 +49,28 @@ def run():
 
             debug_lines.append(f"\nAro {aro} — {m}")
 
-            for d in deals[:5]:
-                debug_lines.append(
-                    f"- {d['title']} | {format_price(d['price_cents'])}"
-                )
+            for d in deals:
+    title_upper = d["title"].upper()
 
-                aro_found = detect_aro(d["title"]) or aro
+    # 1️⃣ Ignorar kits
+    if any(x in title_upper for x in ["KIT", "JOGO", "4 PNEUS", "2 PNEUS"]):
+        continue
 
-                if d["price_cents"] <= LIMITS[aro_found]:
-                    if upsert_deal(conn, d):
-                        d2 = dict(d)
-                        d2["title"] = f"{d2['title']} (aro {aro_found})"
-                        new_items.append(d2)
+    # 2️⃣ Exigir que contenha a medida exata buscada
+    if m.upper() not in title_upper:
+        continue
 
+    aro_found = aro
+
+    debug_lines.append(
+        f"- {d['title']} | {format_price(d['price_cents'])}"
+    )
+
+    if d["price_cents"] <= LIMITS[aro_found]:
+        if upsert_deal(conn, d):
+            d2 = dict(d)
+            d2["title"] = f"{d2['title']} (aro {aro_found})"
+            new_items.append(d2)
     if new_items:
         lines = [f"Promoções encontradas: {len(new_items)}"]
         for d in new_items:
