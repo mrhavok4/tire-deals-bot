@@ -12,10 +12,11 @@ SERPAPI_KEY = os.environ["SERPAPI_KEY"]
 
 DB_PATH = "tirebot.sqlite"
 
+# Ajuste realista de mercado
 LIMITS = {
-    13: 30000,  # R$ 300
-    14: 38000,  # R$ 380
-    15: 45000,  # R$ 450
+    13: 33000,  # R$ 330
+    14: 42000,  # R$ 420
+    15: 48000,  # R$ 480
 }
 
 MEASURES = {
@@ -34,20 +35,26 @@ def format_price(cents: int) -> str:
 def run():
     conn = connect(DB_PATH)
     new_items: List[Dict[str, Any]] = []
+    debug_lines: List[str] = []
 
     for aro, measures in MEASURES.items():
         for m in measures:
             query = f"pneu {m} preço"
+
             try:
                 deals = serpapi_shopping(query, SERPAPI_KEY)
             except Exception as e:
-                print(f"[WARN] SerpAPI error: {e}")
+                debug_lines.append(f"[ERRO] SerpAPI: {e}")
                 continue
 
-            for d in deals:
+            debug_lines.append(f"\nAro {aro} — {m}")
+
+            for d in deals[:5]:
+                debug_lines.append(
+                    f"- {d['title']} | {format_price(d['price_cents'])}"
+                )
+
                 aro_found = detect_aro(d["title"]) or aro
-                if aro_found not in LIMITS:
-                    continue
 
                 if d["price_cents"] <= LIMITS[aro_found]:
                     if upsert_deal(conn, d):
@@ -57,17 +64,18 @@ def run():
 
     if new_items:
         lines = [f"Promoções encontradas: {len(new_items)}"]
-        for d in new_items[:20]:
+        for d in new_items:
             lines.append(
                 f"- [{d['source']}] {d['title']} | {format_price(d['price_cents'])}\n  {d['url']}"
             )
         send_telegram_message(BOT_TOKEN, CHAT_ID, "\n".join(lines))
         return
 
+    # Se não encontrou promo, manda diagnóstico
     send_telegram_message(
         BOT_TOKEN,
         CHAT_ID,
-        "TireBot: execução OK. Nenhuma promoção dentro dos limites."
+        "DEBUG — preços atuais encontrados:\n" + "\n".join(debug_lines[:40])
     )
 
 if __name__ == "__main__":
