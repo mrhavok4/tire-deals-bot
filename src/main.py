@@ -1,5 +1,4 @@
 import os
-import re
 from typing import Dict, Any, List
 
 from src.db import connect, upsert_deal
@@ -12,7 +11,6 @@ SERPAPI_KEY = os.environ["SERPAPI_KEY"]
 
 DB_PATH = "tirebot.sqlite"
 
-# Ajuste realista de mercado
 LIMITS = {
     13: 33000,  # R$ 330
     14: 42000,  # R$ 420
@@ -25,67 +23,91 @@ MEASURES = {
     15: ["185/65 R15", "195/55 R15"],
 }
 
-def detect_aro(text: str):
-    m = re.search(r"\bR\s*(13|14|15)\b", (text or "").upper())
-    return int(m.group(1)) if m else None
+UNWANTED = ["KIT", "JOGO", "4 PNEUS", "2 PNEUS", "PAR", "COMBO"]
 
 def format_price(cents: int) -> str:
     return f"R$ {cents//100:,}".replace(",", ".") + f",{cents%100:02d}"
 
+def _push_topn(topn: List[Dict[str, Any]], item: Dict[str, Any], n: int = 5):
+    topn.append(item)
+    topn.sort(key=lambda x: x["price_cents"])
+    del topn[n:]
+
 def run():
     conn = connect(DB_PATH)
     new_items: List[Dict[str, Any]] = []
-    debug_lines: List[str] = []
+    top_by_aro = {13: [], 14: [], 15: []}
 
     for aro, measures in MEASURES.items():
-        for m in measures:
-            query = f"pneu {m} preço"
+        for measure in measures:
+
+            query = f"pneu {measure} preço"
 
             try:
                 deals = serpapi_shopping(query, SERPAPI_KEY)
             except Exception as e:
-                debug_lines.append(f"[ERRO] SerpAPI: {e}")
+                print(f"[ERRO] SerpAPI: {e}")
                 continue
 
-            debug_lines.append(f"\nAro {aro} — {m}")
-
             for d in deals:
-    title_upper = d["title"].upper()
+                title_upper = d["title"].upper()
 
-    # 1️⃣ Ignorar kits
-    if any(x in title_upper for x in ["KIT", "JOGO", "4 PNEUS", "2 PNEUS"]):
-        continue
+                # Ignorar kits
+                if any(word in title_upper for word in UNWANTED):
+                    continue
 
-    # 2️⃣ Exigir que contenha a medida exata buscada
-    if m.upper() not in title_upper:
-        continue
+                # Exigir medida exata
+                if measure.upper() not in title_upper:
+                    continue
 
-    aro_found = aro
+                price = d["price_cents"]
 
-    debug_lines.append(
-        f"- {d['title']} | {format_price(d['price_cents'])}"
-    )
+                # Guardar TOP referência sempre
+                _push_topn(
+                    top_by_aro[aro],
+                    {
+                        "source": d["source"],
+                        "title": d["title"][:150],
+                        "url": d["url"],
+                        "price_cents": price,
+                    },
+                )
 
-    if d["price_cents"] <= LIMITS[aro_found]:
-        if upsert_deal(conn, d):
-            d2 = dict(d)
-            d2["title"] = f"{d2['title']} (aro {aro_found})"
-            new_items.append(d2)
+                # Filtro de limite
+                if price <= LIMITS[aro]:
+                    if upsert_deal(conn, d):
+                        d2 = dict(d)
+                        d2["title"] = f"{d2['title']} (aro {aro})"
+                        new_items.append(d2)
+
+    # ===== Se encontrou promo =====
     if new_items:
         lines = [f"Promoções encontradas: {len(new_items)}"]
-        for d in new_items:
+        for d in new_items[:20]:
             lines.append(
                 f"- [{d['source']}] {d['title']} | {format_price(d['price_cents'])}\n  {d['url']}"
             )
         send_telegram_message(BOT_TOKEN, CHAT_ID, "\n".join(lines))
         return
 
-    # Se não encontrou promo, manda diagnóstico
-    send_telegram_message(
-        BOT_TOKEN,
-        CHAT_ID,
-        "DEBUG — preços atuais encontrados:\n" + "\n".join(debug_lines[:40])
-    )
+    # ===== Se não encontrou, envia TOP referência =====
+    lines = ["TireBot: nenhuma promoção dentro dos limites.", "Referência de preços atuais:"]
+
+    for aro in (13, 14, 15):
+        lines.append(f"\nAro {aro} (limite {format_price(LIMITS[aro])}):")
+
+        top = top_by_aro[aro]
+        if not top:
+            lines.append("- Nenhum item encontrado")
+            continue
+
+        for item in top:
+            lines.append(
+                f"- [{item['source']}] {item['title']} | {format_price(item['price_cents'])}\n  {item['url']}"
+            )
+
+    send_telegram_message(BOT_TOKEN, CHAT_ID, "\n".join(lines))
+
 
 if __name__ == "__main__":
     run()
